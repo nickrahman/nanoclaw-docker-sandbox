@@ -7,8 +7,7 @@
 set -euo pipefail
 
 WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUFFIX=$(date +%s | tail -c 5)
-SANDBOX_NAME="nanoclaw-sandbox-${SUFFIX}"
+SANDBOX_NAME="nanoclaw"
 
 echo ""
 echo "=== NanoClaw Docker Sandbox Setup ==="
