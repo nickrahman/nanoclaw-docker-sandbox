@@ -202,7 +202,7 @@ function buildVolumeMounts(
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
-    readonly: false,
+    readonly: true,
   });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
