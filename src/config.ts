@@ -1,5 +1,6 @@
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { readEnvFile } from './env.js';
 
@@ -17,7 +18,9 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
+// Use import.meta.url so paths are always correct regardless of cwd
+// (cwd inside the Docker sandbox is /home/agent/workspace, not the project root)
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOME_DIR = process.env.HOME || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
@@ -51,7 +54,7 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || '3001',
   10,
 );
-export const IPC_POLL_INTERVAL = 1000;
+export const IPC_POLL_INTERVAL = 200;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,

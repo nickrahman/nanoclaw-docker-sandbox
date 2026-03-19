@@ -1,5 +1,7 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { markdownToMrkdwn } from '../utils/markdown-to-mrkdwn.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -55,11 +57,17 @@ export class SlackChannel implements Channel {
       );
     }
 
+    // Route all Slack connections (REST + WebSocket) through the sandbox proxy.
+    // The ws library doesn't pick up HTTPS_PROXY automatically, so we pass it explicitly.
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
+    const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+
     this.app = new App({
       token: botToken,
       appToken,
       socketMode: true,
       logLevel: LogLevel.ERROR,
+      agent,
     });
 
     this.setupEventHandlers();
@@ -94,8 +102,7 @@ export class SlackChannel implements Channel {
       const groups = this.opts.registeredGroups();
       if (!groups[jid]) return;
 
-      const isBotMessage =
-        !!msg.bot_id || msg.user === this.botUserId;
+      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
       let senderName: string;
       if (isBotMessage) {
@@ -113,7 +120,10 @@ export class SlackChannel implements Channel {
       let content = msg.text;
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
-        if (content.includes(mentionPattern) && !TRIGGER_PATTERN.test(content)) {
+        if (
+          content.includes(mentionPattern) &&
+          !TRIGGER_PATTERN.test(content)
+        ) {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
       }
@@ -142,10 +152,7 @@ export class SlackChannel implements Channel {
       this.botUserId = auth.user_id as string;
       logger.info({ botUserId: this.botUserId }, 'Connected to Slack');
     } catch (err) {
-      logger.warn(
-        { err },
-        'Connected to Slack but failed to get bot user ID',
-      );
+      logger.warn({ err }, 'Connected to Slack but failed to get bot user ID');
     }
 
     this.connected = true;
@@ -153,8 +160,10 @@ export class SlackChannel implements Channel {
     // Flush any messages queued before connection
     await this.flushOutgoingQueue();
 
-    // Sync channel names on startup
-    await this.syncChannelMetadata();
+    // Sync channel names on startup (non-blocking — nice-to-have metadata)
+    this.syncChannelMetadata().catch((err) =>
+      logger.warn({ err }, 'Channel metadata sync failed'),
+    );
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -170,14 +179,17 @@ export class SlackChannel implements Channel {
     }
 
     try {
+      // Convert markdown to Slack mrkdwn (e.g. **bold** → *bold*, [text](url) → <url|text>)
+      const mrkdwn = markdownToMrkdwn(text);
+
       // Slack limits messages to ~4000 characters; split if needed
-      if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text });
+      if (mrkdwn.length <= MAX_MESSAGE_LENGTH) {
+        await this.app.client.chat.postMessage({ channel: channelId, text: mrkdwn });
       } else {
-        for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
+        for (let i = 0; i < mrkdwn.length; i += MAX_MESSAGE_LENGTH) {
           await this.app.client.chat.postMessage({
             channel: channelId,
-            text: text.slice(i, i + MAX_MESSAGE_LENGTH),
+            text: mrkdwn.slice(i, i + MAX_MESSAGE_LENGTH),
           });
         }
       }
@@ -202,6 +214,16 @@ export class SlackChannel implements Channel {
   async disconnect(): Promise<void> {
     this.connected = false;
     await this.app.stop();
+  }
+
+  async addReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    await this.app.client.reactions.add({ channel: channelId, timestamp: messageId, name: emoji }).catch(() => {});
+  }
+
+  async removeReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    await this.app.client.reactions.remove({ channel: channelId, timestamp: messageId, name: emoji }).catch(() => {});
   }
 
   // Slack does not expose a typing indicator API for bots.
@@ -245,9 +267,7 @@ export class SlackChannel implements Channel {
     }
   }
 
-  private async resolveUserName(
-    userId: string,
-  ): Promise<string | undefined> {
+  private async resolveUserName(userId: string): Promise<string | undefined> {
     if (!userId) return undefined;
 
     const cached = this.userNameCache.get(userId);

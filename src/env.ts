@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { logger } from './logger.js';
+
+// Project root is two levels up from src/env.ts → dist/env.js
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * Parse the .env file and return values for the requested keys.
@@ -9,10 +13,15 @@ import { logger } from './logger.js';
  * so they don't leak to child processes.
  */
 export function readEnvFile(keys: string[]): Record<string, string> {
-  const envFile = path.join(process.cwd(), '.env');
+  // .env.runtime contains resolved secrets (written by start-op.sh via `op inject`)
+  // Fall back to .env which may contain op:// references
+  const runtimeFile = path.join(PROJECT_ROOT, '.env.runtime');
+  const envFile = path.join(PROJECT_ROOT, '.env');
+  const fileToRead = fs.existsSync(runtimeFile) ? runtimeFile : envFile;
   let content: string;
   try {
-    content = fs.readFileSync(envFile, 'utf-8');
+    content = fs.readFileSync(fileToRead, 'utf-8');
+    logger.debug({ file: fileToRead }, 'reading env from file');
   } catch (err) {
     logger.debug({ err }, '.env file not found, using defaults');
     return {};
@@ -36,6 +45,19 @@ export function readEnvFile(keys: string[]): Record<string, string> {
       value = value.slice(1, -1);
     }
     if (value) result[key] = value;
+  }
+
+  // process.env takes precedence (e.g. secrets injected by `docker exec -e`)
+  for (const key of keys) {
+    const envVal = process.env[key];
+    if (envVal) {
+      result[key] = envVal;
+      logger.debug({ key, source: 'process.env' }, 'env var resolved from process.env');
+    } else if (result[key]) {
+      logger.debug({ key, source: '.env file' }, 'env var resolved from .env file');
+    } else {
+      logger.debug({ key }, 'env var not found in process.env or .env file');
+    }
   }
 
   return result;

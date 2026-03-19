@@ -204,6 +204,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   await channel.setTyping?.(chatJid, true);
+  const lastMessageId = missedMessages[missedMessages.length - 1].id;
+  await channel.addReaction?.(chatJid, lastMessageId, 'eyes');
   let hadError = false;
   let outputSentToUser = false;
 
@@ -235,6 +237,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   });
 
   await channel.setTyping?.(chatJid, false);
+  await channel.removeReaction?.(chatJid, lastMessageId, 'eyes');
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {

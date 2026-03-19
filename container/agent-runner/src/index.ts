@@ -365,6 +365,8 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let turnCount = 0;
+  const STATUS_UPDATE_EVERY_N_TURNS = parseInt(process.env.STATUS_UPDATE_TURNS || '0', 10);
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -435,6 +437,15 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      turnCount++;
+      if (STATUS_UPDATE_EVERY_N_TURNS > 0 && turnCount % STATUS_UPDATE_EVERY_N_TURNS === 0) {
+        const content = (message as { message?: { content?: Array<{ type: string; name?: string }> } }).message?.content || [];
+        const toolUse = content.find((b) => b.type === 'tool_use');
+        const statusText = toolUse?.name
+          ? `_Still working... (running ${toolUse.name})_`
+          : `_Still working... (${turnCount} turns)_`;
+        writeOutput({ status: 'success', result: statusText, newSessionId });
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
