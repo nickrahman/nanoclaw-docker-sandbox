@@ -45,9 +45,7 @@ function escapeSlack(text: string): string {
   // Escape Slack's special characters in plain text segments.
   // We only escape & and < (non-mention) to avoid breaking angle-bracket links
   // we've already emitted as <url|text>.
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/<(?![@#!])/g, '&lt;');
+  return text.replace(/&/g, '&amp;').replace(/<(?![@#!])/g, '&lt;');
 }
 
 export function markdownToMrkdwn(markdown: string): string {
@@ -68,7 +66,10 @@ export function markdownToMrkdwn(markdown: string): string {
   });
 
   // ── Step 3: headings ────────────────────────────────────────────────────────
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, (_match, content) => `${HEADING_OPEN}${content.trim()}${HEADING_CLOSE}`);
+  text = text.replace(
+    /^#{1,6}\s+(.+)$/gm,
+    (_match, content) => `${HEADING_OPEN}${content.trim()}${HEADING_CLOSE}`,
+  );
 
   // ── Step 4: bold (process before italic to consume ** before *) ─────────────
   text = text.replace(/\*\*([^*\n]+)\*\*/g, `${BOLD_OPEN}$1${BOLD_CLOSE}`);
@@ -78,7 +79,10 @@ export function markdownToMrkdwn(markdown: string): string {
   // After bold is consumed, remaining single * or _ are italic.
   // Avoid matching inside words for _ (require word boundary or space).
   text = text.replace(/\*([^*\n]+)\*/g, `${ITALIC_OPEN}$1${ITALIC_CLOSE}`);
-  text = text.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, `${ITALIC_OPEN}$1${ITALIC_CLOSE}`);
+  text = text.replace(
+    /(?<!\w)_([^_\n]+)_(?!\w)/g,
+    `${ITALIC_OPEN}$1${ITALIC_CLOSE}`,
+  );
 
   // ── Step 6: strikethrough ───────────────────────────────────────────────────
   text = text.replace(/~~([^~\n]+)~~/g, `${STRIKE_OPEN}$1${STRIKE_CLOSE}`);
@@ -112,14 +116,22 @@ export function markdownToMrkdwn(markdown: string): string {
   });
 
   // ── Step 13: restore inline formatting with ZWS guards ─────────────────────
-  text = text.replace(new RegExp(`${HEADING_OPEN}(.*?)${HEADING_CLOSE}`, 'gs'),
-    (_m, inner) => `*${inner}*`);
-  text = text.replace(new RegExp(`${BOLD_OPEN}(.*?)${BOLD_CLOSE}`, 'gs'),
-    (_m, inner) => `${ZWS}*${inner}*${ZWS}`);
-  text = text.replace(new RegExp(`${ITALIC_OPEN}(.*?)${ITALIC_CLOSE}`, 'gs'),
-    (_m, inner) => `${ZWS}_${inner}_${ZWS}`);
-  text = text.replace(new RegExp(`${STRIKE_OPEN}(.*?)${STRIKE_CLOSE}`, 'gs'),
-    (_m, inner) => `${ZWS}~${inner}~${ZWS}`);
+  text = text.replace(
+    new RegExp(`${HEADING_OPEN}(.*?)${HEADING_CLOSE}`, 'gs'),
+    (_m, inner) => `*${inner}*`,
+  );
+  text = text.replace(
+    new RegExp(`${BOLD_OPEN}(.*?)${BOLD_CLOSE}`, 'gs'),
+    (_m, inner) => `${ZWS}*${inner}*${ZWS}`,
+  );
+  text = text.replace(
+    new RegExp(`${ITALIC_OPEN}(.*?)${ITALIC_CLOSE}`, 'gs'),
+    (_m, inner) => `${ZWS}_${inner}_${ZWS}`,
+  );
+  text = text.replace(
+    new RegExp(`${STRIKE_OPEN}(.*?)${STRIKE_CLOSE}`, 'gs'),
+    (_m, inner) => `${ZWS}~${inner}~${ZWS}`,
+  );
 
   // ── Step 14: restore code blocks ────────────────────────────────────────────
   text = text.replace(

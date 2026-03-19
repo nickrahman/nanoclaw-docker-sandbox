@@ -7,7 +7,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 import {
   CONTAINER_IMAGE,
@@ -79,21 +82,22 @@ function buildVolumeMounts(
       readonly: true,
     });
 
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
+    // Shadow env files so the agent cannot read secrets from the mounted project root.
     // Credentials are injected by the credential proxy, never exposed to containers.
     // Use an empty file instead of /dev/null (Docker may reject /dev/null mounts in sandboxes).
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      const emptyEnv = path.join(DATA_DIR, 'empty-env');
-      if (!fs.existsSync(emptyEnv)) {
-        fs.mkdirSync(path.dirname(emptyEnv), { recursive: true });
-        fs.writeFileSync(emptyEnv, '');
+    const emptyEnv = path.join(DATA_DIR, 'empty-env');
+    if (!fs.existsSync(emptyEnv)) {
+      fs.mkdirSync(path.dirname(emptyEnv), { recursive: true });
+      fs.writeFileSync(emptyEnv, '');
+    }
+    for (const envFileName of ['.env', '.env.runtime']) {
+      if (fs.existsSync(path.join(projectRoot, envFileName))) {
+        mounts.push({
+          hostPath: emptyEnv,
+          containerPath: `/workspace/project/${envFileName}`,
+          readonly: true,
+        });
       }
-      mounts.push({
-        hostPath: emptyEnv,
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
     }
 
     // Main also gets its group folder as the working directory
@@ -245,6 +249,8 @@ function buildContainerArgs(
     'no_proxy',
     'CLAUDE_MODEL',
     'STATUS_UPDATE_TURNS',
+    'GRAFANA_URL',
+    'GRAFANA_SERVICE_ACCOUNT_TOKEN',
     ...caCertEnvVars,
   ]) {
     if (process.env[envVar]) {

@@ -64,6 +64,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+let wakeMessageLoop: (() => void) | null = null;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -404,7 +405,13 @@ async function startMessageLoop(): Promise<void> {
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
-            if (!hasTrigger) continue;
+            if (!hasTrigger) {
+              logger.debug(
+                { group: group.name, messageCount: groupMessages.length },
+                'No trigger found, accumulating messages',
+              );
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
@@ -419,8 +426,8 @@ async function startMessageLoop(): Promise<void> {
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
+            logger.info(
+              { group: group.name, count: messagesToSend.length },
               'Piped messages to active container',
             );
             lastAgentTimestamp[chatJid] =
@@ -434,6 +441,10 @@ async function startMessageLoop(): Promise<void> {
               );
           } else {
             // No active container — enqueue for a new one
+            logger.info(
+              { group: group.name, count: messagesToSend.length },
+              'Enqueued messages for new container',
+            );
             queue.enqueueMessageCheck(chatJid);
           }
         }
@@ -441,7 +452,11 @@ async function startMessageLoop(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    await new Promise<void>((resolve) => {
+      wakeMessageLoop = resolve;
+      setTimeout(resolve, POLL_INTERVAL);
+    });
+    wakeMessageLoop = null;
   }
 }
 
@@ -511,6 +526,8 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      // Wake the message loop immediately instead of waiting for next poll tick
+      wakeMessageLoop?.();
     },
     onChatMetadata: (
       chatJid: string,

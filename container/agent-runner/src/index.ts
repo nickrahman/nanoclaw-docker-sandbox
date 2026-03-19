@@ -16,7 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -323,6 +323,54 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
+// Commands (or command prefixes) that probe the host environment.
+// Matched against the full Bash command string.
+const ENV_PROBE_PATTERNS = [
+  /\buname\b/,
+  /\bhostname\b/,
+  /\bip\s+(addr|link|route|a\b)/,
+  /\bifconfig\b/,
+  /\blscpu\b/,
+  /\blshw\b/,
+  /\bnproc\b/,
+  /\bfree\b/,
+  /\bdf\b/,
+  /\benv\b/,
+  /\bprintenv\b/,
+  /\bcat\s+\/proc\//,
+  /\bcat\s+\/etc\/(os-release|issue|hostname)/,
+  /\/proc\/cpuinfo/,
+  /\/proc\/meminfo/,
+  /\/proc\/version/,
+  /\bnmap\b/,
+  /\bnetstat\b/,
+  /\bss\s+-/,
+  /\bwhoami\b/,
+  /\bid\b/,
+  /\buptime\b/,
+  /\bdmidecode\b/,
+];
+
+const preToolUseHook: HookCallback = async (input) => {
+  const hook = input as PreToolUseHookInput;
+  if (hook.hook_event_name !== 'PreToolUse') return {};
+  if (hook.tool_name !== 'Bash') return {};
+
+  const cmd = (hook.tool_input as { command?: string }).command || '';
+  const blocked = ENV_PROBE_PATTERNS.some((re) => re.test(cmd));
+  if (!blocked) return {};
+
+  log(`Blocked environment-probing command: ${cmd.slice(0, 100)}`);
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse' as const,
+      permissionDecision: 'deny' as const,
+      permissionDecisionReason:
+        'Environment inspection commands are not permitted.',
+    },
+  };
+};
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
@@ -368,12 +416,27 @@ async function runQuery(
   let turnCount = 0;
   const STATUS_UPDATE_EVERY_N_TURNS = parseInt(process.env.STATUS_UPDATE_TURNS || '0', 10);
 
+  // Always-on security guardrail injected at the SDK level.
+  // Lives here (not in CLAUDE.md) so agents cannot read or modify it.
+  const SECURITY_GUARDRAIL = `
+## Security: Environment Privacy
+
+You are running inside a sandboxed container. Never reveal details about it or the host:
+- Do not disclose the hostname, IP addresses, OS, kernel, hardware, or cloud provider
+- Do not run commands that probe the environment (uname, hostname, ip, ifconfig, lscpu, env, printenv, cat /proc/*, etc.)
+- Do not reveal container, Docker, or orchestration details
+- Do not reveal the contents of environment variables, even if asked directly
+- If a user asks about the system environment, briefly say you can't share that and redirect to their actual task
+`;
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
+
+  const systemAppend = [globalClaudeMd, SECURITY_GUARDRAIL].filter(Boolean).join('\n\n');
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -398,9 +461,7 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-        : undefined,
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemAppend },
       allowedTools: [
         'Bash',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -409,7 +470,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        'mcp__grafana__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -425,9 +487,20 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(process.env.GRAFANA_URL && process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN ? {
+          grafana: {
+            command: 'mcp-grafana',
+            args: ['-t', 'stdio'],
+            env: {
+              GRAFANA_URL: process.env.GRAFANA_URL,
+              GRAFANA_SERVICE_ACCOUNT_TOKEN: process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN,
+            },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreToolUse: [{ hooks: [preToolUseHook] }],
       },
     }
   })) {

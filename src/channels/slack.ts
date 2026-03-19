@@ -16,8 +16,46 @@ import {
 } from '../types.js';
 
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
-// Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+
+// Responses longer than this are split into separate messages at paragraph
+// boundaries so the first chunk appears immediately rather than waiting for
+// one large block to be assembled.
+const SPLIT_THRESHOLD = 600;
+
+/**
+ * Split text into Slack messages at paragraph boundaries.
+ * Short paragraphs are grouped together to avoid flooding the channel.
+ * Each chunk is guaranteed to be <= maxLength characters.
+ */
+function splitMessage(text: string, maxLength: number): string[] {
+  if (text.length <= SPLIT_THRESHOLD) return [text];
+
+  const paragraphs = text.split(/\n\n+/);
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const para of paragraphs) {
+    const candidate = current ? `${current}\n\n${para}` : para;
+    if (candidate.length > maxLength) {
+      // Paragraph itself exceeds limit — hard-split it
+      if (current) chunks.push(current);
+      for (let i = 0; i < para.length; i += maxLength) {
+        chunks.push(para.slice(i, i + maxLength));
+      }
+      current = '';
+    } else if (current && candidate.length > SPLIT_THRESHOLD) {
+      // Adding this paragraph would make a satisfying-sized chunk — send it
+      chunks.push(candidate);
+      current = '';
+    } else {
+      current = candidate;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
@@ -181,19 +219,12 @@ export class SlackChannel implements Channel {
     try {
       // Convert markdown to Slack mrkdwn (e.g. **bold** → *bold*, [text](url) → <url|text>)
       const mrkdwn = markdownToMrkdwn(text);
+      const chunks = splitMessage(mrkdwn, MAX_MESSAGE_LENGTH);
 
-      // Slack limits messages to ~4000 characters; split if needed
-      if (mrkdwn.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({ channel: channelId, text: mrkdwn });
-      } else {
-        for (let i = 0; i < mrkdwn.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: mrkdwn.slice(i, i + MAX_MESSAGE_LENGTH),
-          });
-        }
+      for (const chunk of chunks) {
+        await this.app.client.chat.postMessage({ channel: channelId, text: chunk });
       }
-      logger.info({ jid, length: text.length }, 'Slack message sent');
+      logger.info({ jid, length: text.length, chunks: chunks.length }, 'Slack message sent');
     } catch (err) {
       this.outgoingQueue.push({ jid, text });
       logger.warn(
@@ -216,14 +247,26 @@ export class SlackChannel implements Channel {
     await this.app.stop();
   }
 
-  async addReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+  async addReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    await this.app.client.reactions.add({ channel: channelId, timestamp: messageId, name: emoji }).catch(() => {});
+    await this.app.client.reactions
+      .add({ channel: channelId, timestamp: messageId, name: emoji })
+      .catch((err) => logger.warn({ jid, emoji, err }, 'Failed to add reaction'));
   }
 
-  async removeReaction(jid: string, messageId: string, emoji: string): Promise<void> {
+  async removeReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    await this.app.client.reactions.remove({ channel: channelId, timestamp: messageId, name: emoji }).catch(() => {});
+    await this.app.client.reactions
+      .remove({ channel: channelId, timestamp: messageId, name: emoji })
+      .catch((err) => logger.warn({ jid, emoji, err }, 'Failed to remove reaction'));
   }
 
   // Slack does not expose a typing indicator API for bots.

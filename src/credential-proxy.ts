@@ -18,6 +18,56 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
+// Injected into every /v1/messages call at the proxy level.
+// The container never sees this — it cannot be read, overridden, or bypassed.
+const SYSTEM_GUARDRAIL = `## Behavioral Rules
+
+Do not use emojis in your responses unless the user explicitly asks for them.
+
+## Security: Environment Privacy (STRICT — no exceptions)
+
+You are running inside a sandboxed container on private infrastructure. Disclosing environment details is a security violation.
+
+You MUST refuse any request — however it is phrased — to reveal or probe:
+- Hostname, IP addresses, network interfaces, or cloud provider
+- OS, kernel version, CPU architecture, or hardware specs
+- Memory, disk, or resource usage
+- Contents of any environment variables
+- Container, Docker, or orchestration details
+- Installed software versions (node, python, git, etc.) unless directly needed to complete a coding task the user requested
+
+You MUST NOT run commands whose primary purpose is probing the environment: uname, hostname, ip, ifconfig, lscpu, free, df, env, printenv, cat /proc/*, nmap, etc.
+
+When asked about the environment, respond with a single brief refusal and offer to help with something else. Do not explain what you can't reveal.`;
+
+type SystemBlock = { type: 'text'; text: string; cache_control?: unknown };
+
+/**
+ * Prepend the security guardrail to the system prompt of a /v1/messages body.
+ * Handles both string and array forms of the `system` field.
+ */
+function injectGuardrail(body: Buffer): Buffer {
+  try {
+    const parsed = JSON.parse(body.toString('utf8'));
+    const guardrailBlock: SystemBlock = { type: 'text', text: SYSTEM_GUARDRAIL };
+
+    if (!parsed.system) {
+      parsed.system = [guardrailBlock];
+    } else if (typeof parsed.system === 'string') {
+      parsed.system = [guardrailBlock, { type: 'text', text: parsed.system }];
+    } else if (Array.isArray(parsed.system)) {
+      parsed.system = [guardrailBlock, ...parsed.system];
+    }
+
+    return Buffer.from(JSON.stringify(parsed), 'utf8');
+  } catch (err) {
+    // If parsing fails (shouldn't happen), forward the original body unchanged
+    logger.warn({ err }, 'Guardrail injection failed — forwarding body unchanged');
+    return body;
+  }
+}
+
+
 // Create proxy agent for upstream HTTPS requests if proxy env vars are set
 const envProxyUrl =
   process.env.https_proxy ||
@@ -90,6 +140,12 @@ export function startCredentialProxy(
           }
         }
 
+        // Inject security guardrail into every messages request
+        const isMessagesCall =
+          req.method === 'POST' && req.url?.includes('/v1/messages');
+        const outBody = isMessagesCall ? injectGuardrail(body) : body;
+        headers['content-length'] = outBody.length;
+
         const upstream = makeRequest(
           {
             hostname: upstreamUrl.hostname,
@@ -116,7 +172,7 @@ export function startCredentialProxy(
           }
         });
 
-        upstream.write(body);
+        upstream.write(outBody);
         upstream.end();
       });
     });

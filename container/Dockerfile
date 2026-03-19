@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3-pip \
+    && pip3 install --break-system-packages mcp-grafana \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser

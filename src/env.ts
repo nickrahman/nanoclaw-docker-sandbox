@@ -4,7 +4,10 @@ import { fileURLToPath } from 'url';
 import { logger } from './logger.js';
 
 // Project root is two levels up from src/env.ts → dist/env.js
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 /**
  * Parse the .env file and return values for the requested keys.
@@ -52,9 +55,15 @@ export function readEnvFile(keys: string[]): Record<string, string> {
     const envVal = process.env[key];
     if (envVal) {
       result[key] = envVal;
-      logger.debug({ key, source: 'process.env' }, 'env var resolved from process.env');
+      logger.debug(
+        { key, source: 'process.env' },
+        'env var resolved from process.env',
+      );
     } else if (result[key]) {
-      logger.debug({ key, source: '.env file' }, 'env var resolved from .env file');
+      logger.debug(
+        { key, source: '.env file' },
+        'env var resolved from .env file',
+      );
     } else {
       logger.debug({ key }, 'env var not found in process.env or .env file');
     }
