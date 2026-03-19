@@ -32,6 +32,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -247,10 +248,6 @@ function buildContainerArgs(
     'http_proxy',
     'https_proxy',
     'no_proxy',
-    'CLAUDE_MODEL',
-    'STATUS_UPDATE_TURNS',
-    'GRAFANA_URL',
-    'GRAFANA_SERVICE_ACCOUNT_TOKEN',
     ...caCertEnvVars,
   ]) {
     if (process.env[envVar]) {
@@ -268,6 +265,20 @@ function buildContainerArgs(
         args.push('-e', `${envVar}=${process.env[envVar]}`);
       }
     }
+  }
+
+  // App-specific vars: read from .env.runtime (op-injected secrets) so values
+  // are resolved rather than raw op:// references, falling back to process.env
+  const appEnvKeys = [
+    'CLAUDE_MODEL',
+    'STATUS_UPDATE_TURNS',
+    'GRAFANA_URL',
+    'GRAFANA_SERVICE_ACCOUNT_TOKEN',
+  ] as const;
+  const appEnv = readEnvFile([...appEnvKeys]);
+  for (const envVar of appEnvKeys) {
+    const val = appEnv[envVar] || process.env[envVar];
+    if (val) args.push('-e', `${envVar}=${val}`);
   }
 
   // Mount CA certificate into container if NODE_EXTRA_CA_CERTS is set.
