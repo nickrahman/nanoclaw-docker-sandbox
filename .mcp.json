@@ -1,3 +1,8 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "grafana": {
+      "type": "sse",
+      "url": "http://host.docker.internal:8000/sse"
+    }
+  }
 }

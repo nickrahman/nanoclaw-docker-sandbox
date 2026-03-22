@@ -57,6 +57,125 @@ export interface ContainerOutput {
   error?: string;
 }
 
+interface StdioMcpServerConfig {
+  type?: 'stdio'; // optional for backwards compatibility; absence implies stdio
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+interface SseMcpServerConfig {
+  type: 'sse';
+  url: string;
+}
+
+type McpServerConfig = StdioMcpServerConfig | SseMcpServerConfig;
+
+/**
+ * Read .mcp.json from project root and resolve ${VAR} env references
+ * using .env.runtime (op-injected secrets) and process.env.
+ * Returns stdio and SSE server configs. Stdio env values are fully resolved;
+ * SSE servers are passed through as-is (no secrets in their URLs).
+ */
+function loadMcpServers(): Record<string, McpServerConfig> {
+  const mcpFile = path.join(PROJECT_ROOT, '.mcp.json');
+  if (!fs.existsSync(mcpFile)) return {};
+
+  let raw: { mcpServers?: Record<string, unknown> };
+  try {
+    raw = JSON.parse(fs.readFileSync(mcpFile, 'utf-8'));
+  } catch (err) {
+    logger.warn({ err }, 'Failed to parse .mcp.json');
+    return {};
+  }
+
+  if (!raw.mcpServers || typeof raw.mcpServers !== 'object') return {};
+
+  // Collect all ${VAR} references so we can resolve them in one readEnvFile call
+  const varPattern = /\$\{([^}]+)\}/g;
+  const referencedVars = new Set<string>();
+  for (const server of Object.values(raw.mcpServers)) {
+    const env = (server as { env?: Record<string, string> }).env;
+    if (env) {
+      for (const val of Object.values(env)) {
+        for (const match of val.matchAll(varPattern)) {
+          referencedVars.add(match[1]);
+        }
+      }
+    }
+  }
+
+  // Resolve referenced vars from .env.runtime / process.env
+  const resolved = referencedVars.size > 0
+    ? readEnvFile([...referencedVars])
+    : {};
+  // Also check process.env for any vars not in .env.runtime
+  for (const v of referencedVars) {
+    if (!resolved[v] && process.env[v]) resolved[v] = process.env[v];
+  }
+
+  const result: Record<string, McpServerConfig> = {};
+  for (const [name, rawServer] of Object.entries(raw.mcpServers)) {
+    const server = rawServer as {
+      type?: string;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+    };
+
+    // SSE servers: pass through url, no env resolution needed
+    if (server.type === 'sse') {
+      if (!server.url) {
+        logger.warn({ name }, 'SSE MCP server missing url, skipping');
+        continue;
+      }
+      result[name] = { type: 'sse', url: server.url };
+      continue;
+    }
+
+    // stdio servers (explicit or default)
+    if (server.type && server.type !== 'stdio') {
+      logger.debug({ name, type: server.type }, 'Skipping unsupported MCP server type');
+      continue;
+    }
+    if (!server.command) {
+      logger.warn({ name }, 'MCP server missing command, skipping');
+      continue;
+    }
+
+    // Resolve ${VAR} in env values; skip server if any var is unresolved
+    const resolvedEnv: Record<string, string> = {};
+    let hasUnresolved = false;
+    if (server.env) {
+      for (const [key, val] of Object.entries(server.env)) {
+        const resolvedVal = val.replace(varPattern, (_, varName) => {
+          const r = resolved[varName];
+          if (!r) {
+            logger.warn({ name, var: varName }, 'Unresolved env var in MCP server config, skipping server');
+            hasUnresolved = true;
+          }
+          return r || '';
+        });
+        if (hasUnresolved) break;
+        resolvedEnv[key] = resolvedVal;
+      }
+    }
+    if (hasUnresolved) continue;
+
+    // Use just the binary name (not host path) — it must be installed in the container
+    const command = path.basename(server.command);
+
+    result[name] = {
+      command,
+      ...(server.args ? { args: server.args } : {}),
+      ...(Object.keys(resolvedEnv).length > 0 ? { env: resolvedEnv } : {}),
+    };
+  }
+
+  return result;
+}
+
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
@@ -171,6 +290,10 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+  // Must be writable: entrypoint.sh writes the compiled dist-cache here at
+  // startup, and Claude Code writes session transcripts / memory here at
+  // runtime. The agent user owns these files, so write access is intentional
+  // and does not constitute a regression from prior hardening.
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -204,7 +327,9 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  if (fs.existsSync(agentRunnerSrc)) {
+    // Always sync from source so code changes are picked up without image rebuild
+    fs.rmSync(groupAgentRunnerDir, { recursive: true, force: true });
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
@@ -272,13 +397,27 @@ function buildContainerArgs(
   const appEnvKeys = [
     'CLAUDE_MODEL',
     'STATUS_UPDATE_TURNS',
-    'GRAFANA_URL',
-    'GRAFANA_SERVICE_ACCOUNT_TOKEN',
   ] as const;
   const appEnv = readEnvFile([...appEnvKeys]);
   for (const envVar of appEnvKeys) {
     const val = appEnv[envVar] || process.env[envVar];
     if (val) args.push('-e', `${envVar}=${val}`);
+  }
+
+  // Read .mcp.json and resolve ${VAR} env references from .env.runtime,
+  // then pass the fully-resolved config to the container as a single env var.
+  // SSE servers (e.g., mcp-grafana) are passed through as-is with their
+  // sidecar URL; stdio servers have secrets substituted before serialisation.
+  const mcpConfig = loadMcpServers();
+  if (Object.keys(mcpConfig).length > 0) {
+    const mcpJson = JSON.stringify(mcpConfig);
+    logger.info(
+      { servers: Object.keys(mcpConfig), jsonLength: mcpJson.length },
+      'Passing MCP servers to container',
+    );
+    args.push('-e', `NANOCLAW_MCP_SERVERS=${mcpJson}`);
+  } else {
+    logger.warn('No MCP servers found in .mcp.json');
   }
 
   // Mount CA certificate into container if NODE_EXTRA_CA_CERTS is set.
@@ -334,6 +473,12 @@ function buildContainerArgs(
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
     }
+  }
+
+  // Mount host entrypoint so updates take effect without image rebuild
+  const hostEntrypoint = path.join(PROJECT_ROOT, 'container', 'entrypoint.sh');
+  if (fs.existsSync(hostEntrypoint)) {
+    args.push(...readonlyMountArgs(hostEntrypoint, '/app/entrypoint.sh'));
   }
 
   args.push(CONTAINER_IMAGE);

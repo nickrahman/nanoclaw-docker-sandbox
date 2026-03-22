@@ -30,8 +30,6 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
-    python3-pip \
-    && pip3 install --break-system-packages mcp-grafana \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
@@ -70,7 +68,7 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Container input (prompt, group info) is passed via stdin JSON.
 # Credentials are injected by the host's credential proxy — never passed here.
 # Follow-up messages arrive via IPC files in /workspace/ipc/input/
-RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+RUN printf '#!/bin/bash\nset -e\ncd /app\nCACHE_DIR=/home/node/.claude/dist-cache\nSRC_HASH=$(find src -type f | sort | xargs cat | md5sum | awk "{print \\$1}")\nCACHED_HASH=""\n[ -f "$CACHE_DIR/.src_hash" ] && CACHED_HASH=$(cat "$CACHE_DIR/.src_hash")\nif [ "$SRC_HASH" != "$CACHED_HASH" ]; then\n  rm -rf "$CACHE_DIR"\n  npx tsc --outDir "$CACHE_DIR" 2>&1 >&2\n  ln -sf /app/node_modules "$CACHE_DIR/node_modules"\n  echo "$SRC_HASH" > "$CACHE_DIR/.src_hash"\nfi\nnode "$CACHE_DIR/index.js"\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace && chmod 777 /home/node

@@ -60,7 +60,10 @@ const IPC_POLL_MS = 500;
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
- * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
+ * Keeps the iterable alive until end() is called. If the SDK receives an
+ * AsyncIterable instead of a plain string, it treats the session as
+ * multi-turn (isSingleUserTurn=false), which allows agent-teams subagents
+ * to run to completion rather than being cut off after the first turn.
  */
 class MessageStream {
   private queue: SDKUserMessage[] = [];
@@ -259,7 +262,10 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 }
 
 /**
- * Check for _close sentinel.
+ * Check for and consume the _close sentinel file.
+ * The host writes this file when the conversation is over (user stopped
+ * responding, timeout, etc.) so the container can exit cleanly rather
+ * than waiting indefinitely for the next IPC message.
  */
 function shouldClose(): boolean {
   if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
@@ -383,6 +389,11 @@ async function runQuery(
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
+  externalMcpServers: Record<string,
+    | { command: string; args?: string[]; env?: Record<string, string> }
+    | { type: 'sse'; url: string }
+  >,
+  externalMcpToolPatterns: string[],
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
@@ -471,7 +482,7 @@ You are running inside a sandboxed container. Never reveal details about it or t
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        'mcp__grafana__*',
+        ...externalMcpToolPatterns,
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -487,16 +498,7 @@ You are running inside a sandboxed container. Never reveal details about it or t
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        ...(process.env.GRAFANA_URL && process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN ? {
-          grafana: {
-            command: 'mcp-grafana',
-            args: ['-t', 'stdio'],
-            env: {
-              GRAFANA_URL: process.env.GRAFANA_URL,
-              GRAFANA_SERVICE_ACCOUNT_TOKEN: process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN,
-            },
-          },
-        } : {}),
+        ...externalMcpServers,
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
@@ -554,7 +556,6 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
@@ -571,6 +572,52 @@ async function main(): Promise<void> {
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
+
+  // Parse external MCP servers passed by the host via NANOCLAW_MCP_SERVERS env var
+  const externalMcpServers: Record<string,
+    | { command: string; args?: string[]; env?: Record<string, string> }
+    | { type: 'sse'; url: string }
+  > = {};
+  const externalMcpToolPatterns: string[] = [];
+  if (process.env.NANOCLAW_MCP_SERVERS) {
+    try {
+      const parsed = JSON.parse(process.env.NANOCLAW_MCP_SERVERS);
+      for (const [name, config] of Object.entries(parsed)) {
+        const cfg = config as Record<string, unknown>;
+        if (cfg.type === 'sse') {
+          // Guard against malformed entries — a missing url would silently
+          // produce an invalid SSE config that fails only at SDK connect time.
+          if (typeof cfg.url !== 'string' || !cfg.url) {
+            log(`MCP server skipped: ${name} (SSE config missing url)`);
+            continue;
+          }
+          externalMcpServers[name] = { type: 'sse', url: cfg.url };
+          log(`MCP server loaded: ${name} (SSE: ${cfg.url})`);
+        } else {
+          const mcpCfg = cfg as { command: string; args?: string[]; env?: Record<string, string> };
+          if (typeof mcpCfg.command !== 'string' || !mcpCfg.command) {
+            log(`MCP server skipped: ${name} (stdio config missing command)`);
+            continue;
+          }
+          // Ensure MCP server subprocess inherits PATH (for pip --user installs)
+          if (mcpCfg.env && process.env.PATH) {
+            mcpCfg.env.PATH = process.env.PATH;
+          }
+          externalMcpServers[name] = mcpCfg;
+          log(`MCP server loaded: ${name} (command: ${mcpCfg.command})`);
+        }
+        externalMcpToolPatterns.push(`mcp__${name}__*`);
+      }
+    } catch (err) {
+      // Parse failure is non-fatal: the agent continues without external MCP
+      // tools rather than crashing. A clear error is logged so operators can
+      // diagnose misconfigured .mcp.json on the host.
+      log(`Failed to parse NANOCLAW_MCP_SERVERS — no external MCP tools will be available: ${err}`);
+    }
+  }
+  if (externalMcpToolPatterns.length === 0) {
+    log('No external MCP servers configured');
+  }
 
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -595,7 +642,7 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, externalMcpServers, externalMcpToolPatterns, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
