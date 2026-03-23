@@ -53,23 +53,19 @@ GRAFANA_SA_TOKEN=$(grep '^GRAFANA_SERVICE_ACCOUNT_TOKEN=' "$DIR/.env.runtime" | 
 if [ -n "$GRAFANA_URL" ] && [ -n "$GRAFANA_SA_TOKEN" ]; then
   echo "Starting mcp-grafana sidecar..."
   # The sidecar runs inside the sandbox's Docker daemon (nested Docker) so that
-  # it shares the sandbox's network namespace and is reachable by nanoclaw via
-  # localhost:8000.  Sidecar containers started on the host would be unreachable
-  # from inside the sandbox.
+  # agent containers can reach it at host.docker.internal:8000. Sidecar
+  # containers started on the host would be unreachable from inside the sandbox.
   #
-  # --network host: the sidecar binds directly on the sandbox's loopback, which
-  # is how nanoclaw discovers it at http://localhost:8000 (via NANOCLAW_MCP_SERVERS).
-  # HTTPS_PROXY/NO_PROXY: route outbound Grafana API calls through the sandbox
-  # MITM proxy while exempting host.docker.internal (the proxy gateway itself)
-  # to avoid a routing loop.
+  # -p 8000:8000: publish the SSE port on the sandbox's bridge network.
+  # (--network host is not supported by the sandbox's Docker daemon.)
+  # Agent containers reach it via host.docker.internal:8000 (resolved by
+  # --add-host in container-runtime.ts).
   if ! docker sandbox exec "$SANDBOX_NAME" docker run -d \
     --name nanoclaw-mcp-grafana \
-    --network host \
+    -p 8000:8000 \
     --restart unless-stopped \
     -e "GRAFANA_URL=$GRAFANA_URL" \
     -e "GRAFANA_SERVICE_ACCOUNT_TOKEN=$GRAFANA_SA_TOKEN" \
-    -e "HTTPS_PROXY=http://host.docker.internal:3128" \
-    -e "NO_PROXY=host.docker.internal" \
     mcp/grafana; then
     echo "WARNING: mcp-grafana sidecar failed to start (docker run returned non-zero)"
   else
